@@ -9,4 +9,4 @@
 *.nacp
 *.nro
 *.code-workspace
-/example
+/example/build
