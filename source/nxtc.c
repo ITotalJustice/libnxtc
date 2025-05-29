@@ -271,15 +271,23 @@ static void nxtcGetSystemLanguage(void)
     Result rc = 0;
     u64 lang_code = 0;
 
-    /* Get system language. */
-    rc = setGetSystemLanguage(&lang_code);
+    /* Initialize set services. */
+    rc = setInitialize();
     if (R_SUCCEEDED(rc))
     {
-        /* Convert the retrieved language code into a SetLanguage value. */
-        rc = setMakeLanguage(lang_code, &g_systemLanguage);
+        /* Get system language. */
+        rc = setGetSystemLanguage(&lang_code);
+        if (R_SUCCEEDED(rc))
+        {
+            /* Convert the retrieved language code into a SetLanguage value. */
+            rc = setMakeLanguage(lang_code, &g_systemLanguage);
 
-        /* Use American English for unsupported system languages. */
-        if (g_systemLanguage < SetLanguage_JA || (R_SUCCEEDED(rc) && g_systemLanguage >= SetLanguage_Total)) g_systemLanguage = SetLanguage_ENUS;
+            /* Use American English for unsupported system languages. */
+            if (g_systemLanguage < SetLanguage_JA || (R_SUCCEEDED(rc) && g_systemLanguage >= SetLanguage_Total)) g_systemLanguage = SetLanguage_ENUS;
+        }
+
+        /* Close set services. */
+        setExit();
     }
 
     NXTC_LOG_MSG("Retrieved system language: %d.", g_systemLanguage);
@@ -531,9 +539,16 @@ static void nxtcSaveFile(void)
 
     bool success = false;
 
-    if (!g_nxtcInit || !g_titleCache || !g_titleCacheCount || !g_cacheFlushRequired)
+    if (!g_nxtcInit || !g_titleCache || !g_titleCacheCount)
     {
         NXTC_LOG_MSG("Invalid parameters!");
+        return;
+    }
+
+    /* Return immediately if there are no pending changes to the title cache file. */
+    if (!g_cacheFlushRequired)
+    {
+        NXTC_LOG_MSG("No changes required.");
         return;
     }
 

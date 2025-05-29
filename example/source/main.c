@@ -270,6 +270,20 @@ int main(int argc, char **argv)
     consoleUpdate(NULL);
 
     /* Retrieve application IDs. */
+    printf("\nPress A to retrieve application IDs.\n\n");
+    consoleUpdate(NULL);
+
+    while(appletMainLoop())
+    {
+        padUpdate(&pad);
+
+        u64 keys_down = padGetButtonsDown(&pad);
+        if (keys_down & HidNpadButton_A) break;
+
+        svcSleepThread(10000000ULL);
+    }
+
+    /* Retrieve application IDs. */
     printf("\t- Retrieving application IDs: ");
     consoleUpdate(NULL);
 
