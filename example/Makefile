@@ -42,7 +42,7 @@ BUILD_TIMESTAMP	:=	$(strip $(shell date --utc '+%Y-%m-%d %T UTC'))
 
 VERSION_MAJOR	:=	0
 VERSION_MINOR	:=	0
-VERSION_MICRO	:=	1
+VERSION_MICRO	:=	2
 
 APP_TITLE		:=	libnxtc-example
 APP_AUTHOR		:=	DarkMatterCore
@@ -60,10 +60,11 @@ INCLUDES		:=	include
 #---------------------------------------------------------------------------------
 ARCH		:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS		:=	-g -Wall -Wextra -Werror -O2 -std=c23 -flto -ffunction-sections $(ARCH) $(DEFINES) $(INCLUDE) -D__SWITCH__
+CFLAGS		:=	-g -Wall -Wextra -Werror -O2 -flto -ffunction-sections $(ARCH) $(DEFINES) $(INCLUDE) -D__SWITCH__
 CFLAGS		+=	-DAPP_TITLE=\"${APP_TITLE}\" -DBUILD_TIMESTAMP="\"${BUILD_TIMESTAMP}\""
 
-CXXFLAGS	:=	$(CFLAGS) -flto -fno-rtti -fno-exceptions
+CXXFLAGS	:=	$(CFLAGS) -fno-rtti -fno-exceptions -std=c++20
+CFLAGS		+=	-std=c23
 
 ASFLAGS		:=	-g $(ARCH)
 LDFLAGS		=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
