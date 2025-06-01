@@ -92,74 +92,24 @@ static bool utilsGetControlData(u64 application_id, NsApplicationControlData *ou
     return true;
 }
 
-static NxTitleCacheApplicationMetadata *utilsInitializeApplicationMetadataFromControlData(u64 application_id, const NsApplicationControlData *control_data, u64 control_data_size)
-{
-    Result rc = 0;
-    NacpLanguageEntry *lang_entry = NULL;
-    u32 icon_size = 0;
-    NxTitleCacheApplicationMetadata *out = NULL;
-    bool success = false;
-
-    /* Get language entry. */
-    rc = nacpGetLanguageEntry((NacpStruct*)&(control_data->nacp), &lang_entry);
-    if (R_FAILED(rc)) goto end;
-
-    /* Allocate memory for our application metadata entry. */
-    out = calloc(1, sizeof(NxTitleCacheApplicationMetadata));
-    if (!out) goto end;
-
-    /* Calculate icon size. */
-    icon_size = (u32)(control_data_size - sizeof(NacpStruct));
-    if (icon_size)
-    {
-        /* Allocate memory for our icon. */
-        out->icon_data = malloc(icon_size);
-        if (!out->icon_data) goto end;
-
-        /* Copy icon data. */
-        memcpy(out->icon_data, control_data->icon, icon_size);
-
-        /* Set icon size. */
-        out->icon_size = icon_size;
-    }
-
-    /* Fill the rest of the information. */
-    out->title_id = application_id;
-
-    if (lang_entry)
-    {
-        memcpy(&(out->lang_entry), lang_entry, sizeof(NacpLanguageEntry));
-    } else {
-        /* Yes, this can happen -- NACPs with empty language entries are a thing, somehow. */
-        sprintf(out->lang_entry.name, "Unknown");
-        sprintf(out->lang_entry.author, "Unknown");
-    }
-
-    /* Update flag. */
-    success = true;
-
-end:
-    if (!success && out)
-    {
-        free(out);
-        out = NULL;
-    }
-
-    return out;
-}
-
 static NxTitleCacheApplicationMetadata *utilsGenerateApplicationMetadataEntryFromNsControlData(u64 application_id)
 {
     NsApplicationControlData ns_control_data = {0};
-    u64 ns_control_data_size = 0;
+    u64 ns_control_data_size = 0, icon_size = 0;
 
     NxTitleCacheApplicationMetadata *app_metadata = NULL;
 
     /* Retrieve application control data from ns. */
     if (!utilsGetControlData(application_id, &ns_control_data, &ns_control_data_size)) goto end;
 
-    /* Initialize application metadata using the control data we just retrieved. */
-    app_metadata = utilsInitializeApplicationMetadataFromControlData(application_id, &ns_control_data, ns_control_data_size);
+    /* Calculate icon size. */
+    icon_size = (ns_control_data_size - sizeof(NacpStruct));
+
+    /* Update title cache using the control data we just retrieved. */
+    if (!nxtcAddEntry(application_id, &(ns_control_data.nacp), icon_size, ns_control_data.icon, false)) goto end;
+
+    /* Get application metadata from our cache. */
+    app_metadata = nxtcGetApplicationMetadataEntryById(application_id);
 
 end:
     return app_metadata;
@@ -169,11 +119,10 @@ NX_INLINE void utilsPrintApplicationMetadataInfo(NxTitleCacheApplicationMetadata
 {
     printf("\t\t- %016lX: OK!\n" \
            "\t\t\t- Source: %s\n" \
-           "\t\t\t- Name: %.*s\n" \
-           "\t\t\t- Publisher: %.*s\n" \
+           "\t\t\t- Name: %s\n" \
+           "\t\t\t- Publisher: %s\n" \
            "\t\t\t- Icon size: 0x%lX\n", \
-           app_metadata->title_id, is_cache ? "cache" : "ns", (int)sizeof(app_metadata->lang_entry.name), app_metadata->lang_entry.name, \
-           (int)sizeof(app_metadata->lang_entry.author), app_metadata->lang_entry.author, app_metadata->icon_size);
+           app_metadata->title_id, is_cache ? "cache" : "ns", app_metadata->name, app_metadata->publisher, app_metadata->icon_size);
 }
 
 static bool utilsGetApplicationMetadata(u64 application_id)
@@ -201,9 +150,6 @@ static bool utilsGetApplicationMetadata(u64 application_id)
 
     /* Print metadata. */
     utilsPrintApplicationMetadataInfo(app_metadata, false);
-
-    /* Update title cache using the application metadata we just retrieved. */
-    nxtcAddEntry(app_metadata->title_id, app_metadata->lang_entry.name, app_metadata->lang_entry.author, app_metadata->icon_size, app_metadata->icon_data, false);
 
     /* Update flag. */
     success = true;

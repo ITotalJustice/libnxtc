@@ -7,6 +7,8 @@ Main features
 * Serialized binary format that's really easy to parse. No need to clutter your SD card's filesystem with lots of NACPs and JPEGs.
 * Keeps it simple by only storing what's absolutely needed from a title's control data: its name, its publisher and its JPEG icon.
 * Hardware-accelerated integrity verification using CRC32 checksums.
+* Keeps track of the current console language, which means that if it's changed by the user, the library will automatically clear the cache to let the homebrew application populate it once more with proper data.
+* Automatically uses language-specific placeholders (e.g. `[UNKNOWN]`, `[DESCONOCIDO]`, etc.) as fallback if a title name and/or publisher string is empty.
 * Once the title cache file is created on the SD card, it can be parsed and loaded very quickly (up to 4 seconds for ~600 titles).
 * The generated title cache file is saved to `sdmc:/switch/nxtc.bin`, which means that it can be shared and used by multiple homebrew applications (as long as they use this library or an equivalent implementation, of course).
 
@@ -19,7 +21,7 @@ Prior to the release of the aforementioned update, a single call to the aptly na
 
 As you can see, this can build up pretty quickly for anyone with many software titles on their Nintendo Switch, which is exactly what some [nxdumptool](https://github.com/DarkMatterCore/nxdumptool) users experienced right after I updated the application to support HOS 20.0.0. A single user reported that the application's boot time went up to approximately \*a whole minute\* after updating their console. We quickly realized something was afoot.
 
-After discovering that `nsGetApplicationControlData()` was at fault, but not before evaluating multiple possible solutions, I decided to come up with a way to safely and efficiently store control data into a single cache file on the SD card. This was my [motivation](https://www.youtube.com/watch?v=6JRWqIz3Eow).
+After discovering that `nsGetApplicationControlData()` was at fault, but not before evaluating multiple possible solutions, I decided to come up with a way to safely and efficiently store control data into a single cache file on the SD card that could potentially be used by more than just my own application. This was my [motivation](https://www.youtube.com/watch?v=6JRWqIz3Eow).
 
 Licensing
 --------------
@@ -43,12 +45,12 @@ This section assumes you've already built the library by following the steps fro
     * In case you need to report any bugs, please make sure you're using the debug build and provide its logfile.
 2. Include the `nxtc.h` header file somewhere in your code.
 3. Initialize the title cache interface with `nxtcInitialize()`.
-4. Update your code to issue calls to `nxtcGetApplicationMetadataEntryById()` at the points where you're already retrieving control data for a single application. This will return an application metadata entry from the cache.
+4. Update your code to issue calls to `nxtcGetApplicationMetadataEntryById()` right before the point(s) where you're already retrieving control data for a single application. This will return an application metadata entry from the cache.
     * Please remember to use `nxtcFreeApplicationMetadata()` to free the returned data after you're done using it.
 5. If the previous call fails (e.g. title unavailable within the internal cache):
     * You should then and \*only\* then retrieve control data through regular means, either by using `nsGetApplicationControlData()` or by doing it on your own (e.g. through manual Control NCA parsing, which is faster under HOS 20.0.0+).
-    * You should immediately call `nxtcAddEntry()` to populate the internal title cache.
-6. If, for some reason, you need to manually flush the title cache file at any given point, just call `nxtcFlushCacheFile()`.
+    * Calculate the icon size and immediately call `nxtcAddEntry()` to populate the internal title cache.
+6. If, for some reason, you need to manually flush the title cache file or wipe the internal tile cache at any given point, just call `nxtcFlushCacheFile()` or `nxtcWipeCache()`, respectively.
 7. Close the title cache interface with `nxtcExit()` when you're done.
 
 Please check both the header file located at `/include/nxtc.h` and the provided test application in `/example` for additional information.

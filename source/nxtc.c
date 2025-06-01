@@ -43,17 +43,10 @@ typedef struct {
 
 LIB_ASSERT(NxTitleCacheFileEntry, 0x20);
 
-typedef struct {
-    u64 title_id;
-    char *name;         ///< Pointer to a dynamically allocated buffer that holds the title name string.
-    char *publisher;    ///< Pointer to a dynamically allocated buffer that holds the title publisher string.
-    u32 icon_size;      ///< JPEG icon size. Must not exceed NACP_MAX_ICON_SIZE.
-    u8 *icon_data;      ///< Pointer to a dynamically allocated buffer that holds the JPEG icon data.
-} NxTitleCacheEntry;
-
 /* Function prototypes. */
 
 static void nxtcGetSystemLanguage(void);
+static const char *nxtcGetPlaceholderString(void);
 
 static void nxtcLoadFile(void);
 
@@ -66,19 +59,22 @@ static void nxtcSaveFile(void);
 static bool nxtcPopulateFileHeader(u8 *cache_file_data, size_t *out_cur_offset);
 static NxTitleCacheFileEntry *nxtcSerializeDataBlobs(u8 **cache_file_data, size_t *out_cur_offset);
 
-static NxTitleCacheEntry *nxtcGenerateCacheEntryFromFileEntry(u8 *cache_file_data, const NxTitleCacheFileEntry *cache_file_entry, size_t *out_cur_offset);
-static NxTitleCacheEntry *nxtcGenerateCacheEntryFromUserData(u64 title_id, const char *name, const char *publisher, size_t icon_size, const void *icon_data);
-static bool nxtcUpdateCacheEntryWithUserData(NxTitleCacheEntry *cache_entry, const char *name, const char *publisher, size_t icon_size, const void *icon_data);
+static NxTitleCacheApplicationMetadata *nxtcGenerateCacheEntryFromFileEntry(u8 *cache_file_data, const NxTitleCacheFileEntry *cache_file_entry, size_t *out_cur_offset);
+static NxTitleCacheApplicationMetadata *nxtcGenerateCacheEntryFromUserData(u64 title_id, const NacpLanguageEntry *lang_entry, size_t icon_size, const void *icon_data);
+static bool nxtcUpdateCacheEntryWithUserData(NxTitleCacheApplicationMetadata *cache_entry, const NacpLanguageEntry *lang_entry, size_t icon_size, const void *icon_data);
 
-NX_INLINE void nxtcFreeCacheEntry(NxTitleCacheEntry **cache_entry);
+static void nxtcFillCacheEntryWithUserData(NxTitleCacheApplicationMetadata *cache_entry, const NacpLanguageEntry *lang_entry, size_t icon_size, const void *icon_data);
 
-static bool nxtcReallocateCacheEntryArray(u32 extra_entry_count, bool free_entries);
+static bool nxtcReallocateTitleCache(u32 extra_entry_count, bool free_entries);
+static void nxtcFreeTitleCache(bool flush);
 
-static bool nxtcAppendDataBlobToFileCacheBuffer(u8 **cache_file_data, const NxTitleCacheEntry *cache_entry, NxTitleCacheFileEntry *cache_file_entry, u32 *out_blob_offset, size_t *out_cur_offset);
+static bool nxtcAppendDataBlobToFileCacheBuffer(u8 **cache_file_data, const NxTitleCacheApplicationMetadata *cache_entry, NxTitleCacheFileEntry *cache_file_entry, u32 *out_blob_offset, size_t *out_cur_offset);
+
+static const NacpLanguageEntry *nxtcGetNacpLanguageEntry(const NacpStruct *nacp);
 
 NX_INLINE u32 nxtcCalculateDataBlobSize(u16 name_len, u16 publisher_len, u32 icon_size);
 
-static NxTitleCacheEntry *nxtcGetEntryById(u64 title_id);
+static NxTitleCacheApplicationMetadata *_nxtcGetApplicationMetadataEntryById(u64 title_id);
 
 static int nxtcEntrySortFunction(const void *a, const void *b);
 
@@ -87,12 +83,58 @@ static int nxtcEntrySortFunction(const void *a, const void *b);
 static bool g_nxtcInit = false;
 static Mutex g_nxtcMutex = 0;
 
-static SetLanguage g_systemLanguage = SetLanguage_ENUS; // Default to American English.
+static const SetLanguage g_defaultSystemLanguage = SetLanguage_ENUS;    // Default to American English.
+static SetLanguage g_systemLanguage = g_defaultSystemLanguage;
+static const char *g_curPlaceholderString = NULL;
 
-static NxTitleCacheEntry **g_titleCache = NULL;
+static NxTitleCacheApplicationMetadata **g_titleCache = NULL;
 static u32 g_titleCacheCount = 0;
 
 static bool g_cacheFlushRequired = false;
+
+/// Provides language-specific placeholders used when a title name/publisher isn't available.
+static const char *g_placeholderStrings[SetLanguage_Total] = {
+    [SetLanguage_JA]     = "[未知]",            ///< "Michi".
+    [SetLanguage_ENUS]   = "[UNKNOWN]",
+    [SetLanguage_FR]     = "[INCONNU]",
+    [SetLanguage_DE]     = "[UNBEKANNT]",
+    [SetLanguage_IT]     = "[SCONOSCIUTO]",
+    [SetLanguage_ES]     = "[DESCONOCIDO]",
+    [SetLanguage_ZHCN]   = "[未知]",            ///< "Wèizhī".
+    [SetLanguage_KO]     = "[알려지지 않은]",   ///< "Allyeojiji anh-eun".
+    [SetLanguage_NL]     = "[ONBEKEND]",
+    [SetLanguage_PT]     = "[DESCONHECIDO]",
+    [SetLanguage_RU]     = "[неизвестный]",     ///< "Neizvestnyy".
+    [SetLanguage_ZHTW]   = "[未知]",            ///< "Wèizhī".
+    [SetLanguage_ENGB]   = "[UNKNOWN]",
+    [SetLanguage_FRCA]   = "[INCONNU]",
+    [SetLanguage_ES419]  = "[DESCONOCIDO]",
+    [SetLanguage_ZHHANS] = "[未知]",            ///< "Wèizhī".
+    [SetLanguage_ZHHANT] = "[未知]",            ///< "Wèizhī".
+    [SetLanguage_PTBR]   = "[DESCONHECIDO]"
+};
+
+/// Maps SetLanguage values to NacpLanguageEntry indexes.
+static const u8 g_nacpLangTable[SetLanguage_Total] = {
+    [SetLanguage_JA]     =  2,
+    [SetLanguage_ENUS]   =  0,
+    [SetLanguage_FR]     =  3,
+    [SetLanguage_DE]     =  4,
+    [SetLanguage_IT]     =  7,
+    [SetLanguage_ES]     =  6,
+    [SetLanguage_ZHCN]   = 14,
+    [SetLanguage_KO]     = 12,
+    [SetLanguage_NL]     =  8,
+    [SetLanguage_PT]     = 10,
+    [SetLanguage_RU]     = 11,
+    [SetLanguage_ZHTW]   = 13,
+    [SetLanguage_ENGB]   =  1,
+    [SetLanguage_FRCA]   =  9,
+    [SetLanguage_ES419]  =  5,
+    [SetLanguage_ZHHANS] = 14,
+    [SetLanguage_ZHHANT] = 13,
+    [SetLanguage_PTBR]   = 15
+};
 
 bool nxtcInitialize(void)
 {
@@ -109,6 +151,9 @@ bool nxtcInitialize(void)
 
         /* Get system language. */
         nxtcGetSystemLanguage();
+
+        /* Get placeholder string. */
+        g_curPlaceholderString = nxtcGetPlaceholderString();
 
         /* Load title cache file. */
         nxtcLoadFile();
@@ -127,27 +172,18 @@ void nxtcExit(void)
         /* Check if the interface has already been initialized. */
         if (!g_nxtcInit) break;
 
-        if (g_titleCache)
-        {
-            /* Write title cache file. */
-            /* This will return immediately if there's no pending changes. */
-            nxtcSaveFile();
+        /* Write title cache file and free our title cache. */
+        nxtcFreeTitleCache(true);
 
-            /* Free title cache entries. */
-            for(u32 i = 0; i < g_titleCacheCount; i++) nxtcFreeCacheEntry(&(g_titleCache[i]));
-
-            /* Free title cache pointer array. */
-            free(g_titleCache);
-            g_titleCache = NULL;
-        }
-
-        /* Reset title cache entry count. */
-        g_titleCacheCount = 0;
+        /* Restore language variables. */
+        g_systemLanguage = g_defaultSystemLanguage;
+        g_curPlaceholderString = NULL;
 
         /* Close logfile. */
         nxtcLogCloseLogFile();
 
-        g_nxtcInit = false;
+        /* Update flags. */
+        g_nxtcInit = g_cacheFlushRequired = false;
     }
 }
 
@@ -158,7 +194,7 @@ bool nxtcCheckIfEntryExists(u64 title_id)
     SCOPED_LOCK(&g_nxtcMutex)
     {
         /* Retrieve title cache entry. */
-        ret = (nxtcGetEntryById(title_id) != NULL);
+        ret = (_nxtcGetApplicationMetadataEntryById(title_id) != NULL);
     }
 
     return ret;
@@ -171,7 +207,7 @@ NxTitleCacheApplicationMetadata *nxtcGetApplicationMetadataEntryById(u64 title_i
     SCOPED_LOCK(&g_nxtcMutex)
     {
         /* Retrieve title cache entry. */
-        NxTitleCacheEntry *cache_entry = nxtcGetEntryById(title_id);
+        NxTitleCacheApplicationMetadata *cache_entry = _nxtcGetApplicationMetadataEntryById(title_id);
         if (!cache_entry)
         {
             NXTC_LOG_MSG("Title cache entry with ID %016lX is unavailable!", title_id);
@@ -188,41 +224,43 @@ NxTitleCacheApplicationMetadata *nxtcGetApplicationMetadataEntryById(u64 title_i
 
         /* Populate output. */
         out->title_id = title_id;
-        snprintf(out->lang_entry.name, sizeof(out->lang_entry.name), "%s", cache_entry->name);
-        snprintf(out->lang_entry.author, sizeof(out->lang_entry.author), "%s", cache_entry->publisher);
+        out->name = strdup(cache_entry->name);
+        out->publisher = strdup(cache_entry->publisher);
         out->icon_size = cache_entry->icon_size;
-
         out->icon_data = malloc(out->icon_size);
-        if (!out->icon_data)
-        {
-            NXTC_LOG_MSG("Failed to allocate 0x%lX byte-long icon buffer for %016lX.", out->icon_size, title_id);
-            free(out);
-            out = NULL;
-            break;
-        }
 
-        memcpy(out->icon_data, cache_entry->icon_data, out->icon_size);
+        if (out->icon_data) memcpy(out->icon_data, cache_entry->icon_data, out->icon_size);
+
+        if (!out->name || !out->publisher || !out->icon_data)
+        {
+            NXTC_LOG_MSG("Failed to allocate application metadata for %016lX.", title_id);
+            nxtcFreeApplicationMetadata(&out);
+        }
     }
 
     return out;
 }
 
-bool nxtcAddEntry(u64 title_id, const char *name, const char *publisher, size_t icon_size, const void *icon_data, bool force_add)
+bool nxtcAddEntry(u64 title_id, const NacpStruct *nacp, size_t icon_size, const void *icon_data, bool force_add)
 {
     bool ret = false;
 
     SCOPED_LOCK(&g_nxtcMutex)
     {
-        NxTitleCacheEntry *cache_entry = NULL;
+        const NacpLanguageEntry *lang_entry = NULL;
+        NxTitleCacheApplicationMetadata *cache_entry = NULL;
 
-        if (!title_id || !name || !*name || !publisher || !*publisher || !icon_size || icon_size > NACP_MAX_ICON_SIZE || !icon_data)
+        if (!title_id || !nacp || !icon_size || icon_size > NACP_MAX_ICON_SIZE || !icon_data)
         {
             NXTC_LOG_MSG("Invalid parameters!");
             break;
         }
 
+        /* Get NACP properties. */
+        lang_entry = nxtcGetNacpLanguageEntry(nacp);
+
         /* Check if the requested title is available within our title cache. */
-        cache_entry = nxtcGetEntryById(title_id);
+        cache_entry = _nxtcGetApplicationMetadataEntryById(title_id);
         if (cache_entry)
         {
             /* Return immediately if this operation is not enforced. */
@@ -233,16 +271,16 @@ bool nxtcAddEntry(u64 title_id, const char *name, const char *publisher, size_t 
             }
 
             /* Update cache entry with the provided data. */
-            if (!nxtcUpdateCacheEntryWithUserData(cache_entry, name, publisher, icon_size, icon_data)) break;
+            if (!nxtcUpdateCacheEntryWithUserData(cache_entry, lang_entry, icon_size, icon_data)) break;
         } else {
             /* Generate title cache entry. */
-            cache_entry = nxtcGenerateCacheEntryFromUserData(title_id, name, publisher, icon_size, icon_data);
+            cache_entry = nxtcGenerateCacheEntryFromUserData(title_id, lang_entry, icon_size, icon_data);
             if (!cache_entry) break;
 
             /* Reallocate title cache entry pointer array. */
-            if (!nxtcReallocateCacheEntryArray(1, false))
+            if (!nxtcReallocateTitleCache(1, false))
             {
-                nxtcFreeCacheEntry(&cache_entry);
+                nxtcFreeApplicationMetadata(&cache_entry);
                 break;
             }
 
@@ -250,7 +288,7 @@ bool nxtcAddEntry(u64 title_id, const char *name, const char *publisher, size_t 
             g_titleCache[g_titleCacheCount++] = cache_entry;
 
             /* Sort title cache entries by title ID. */
-            if (g_titleCacheCount > 1) qsort(g_titleCache, g_titleCacheCount, sizeof(NxTitleCacheEntry*), &nxtcEntrySortFunction);
+            if (g_titleCacheCount > 1) qsort(g_titleCache, g_titleCacheCount, sizeof(NxTitleCacheApplicationMetadata*), &nxtcEntrySortFunction);
         }
 
         /* Update flags. */
@@ -260,9 +298,47 @@ bool nxtcAddEntry(u64 title_id, const char *name, const char *publisher, size_t 
     return ret;
 }
 
+bool nxtcGetCacheLanguage(SetLanguage *out_lang)
+{
+    bool ret = false;
+
+    SCOPED_LOCK(&g_nxtcMutex)
+    {
+        if (!g_nxtcInit || !out_lang) {
+            NXTC_LOG_MSG("Invalid parameters!");
+            break;
+        }
+
+        /* Update values. */
+        *out_lang = g_systemLanguage;
+        ret = true;
+    }
+
+    return ret;
+}
+
 void nxtcFlushCacheFile(void)
 {
     SCOPED_LOCK(&g_nxtcMutex) nxtcSaveFile();
+}
+
+void nxtcWipeCache(void)
+{
+    SCOPED_LOCK(&g_nxtcMutex)
+    {
+        /* Check if the interface has already been initialized. */
+        if (!g_nxtcInit) break;
+
+        /* Free our title cache. */
+        nxtcFreeTitleCache(false);
+
+        /* Delete title cache file. */
+        remove(TITLE_CACHE_PATH);
+        nxtcUtilsCommitSdCardFileSystemChanges();
+
+        /* Update flag. */
+        g_cacheFlushRequired = false;
+    }
 }
 
 /* Loosely based on code from libnx's nacpGetLanguageEntry(). */
@@ -281,6 +357,7 @@ static void nxtcGetSystemLanguage(void)
         {
             /* Convert the retrieved language code into a SetLanguage value. */
             rc = setMakeLanguage(lang_code, &g_systemLanguage);
+            if (R_FAILED(rc)) NXTC_LOG_MSG("setMakeLanguage() failed! (0x%X).", rc);
 
             /* Use American English for unsupported system languages. */
             if (g_systemLanguage < SetLanguage_JA || (R_SUCCEEDED(rc) && g_systemLanguage >= SetLanguage_Total)) g_systemLanguage = SetLanguage_ENUS;
@@ -288,9 +365,16 @@ static void nxtcGetSystemLanguage(void)
 
         /* Close set services. */
         setExit();
+    } else {
+        NXTC_LOG_MSG("setInitialize() failed! (0x%X).", rc);
     }
 
     NXTC_LOG_MSG("Retrieved system language: %d.", g_systemLanguage);
+}
+
+static const char *nxtcGetPlaceholderString(void)
+{
+    return (g_systemLanguage < SetLanguage_Total ? g_placeholderStrings[g_systemLanguage] : g_placeholderStrings[SetLanguage_ENUS]);
 }
 
 static void nxtcLoadFile(void)
@@ -467,7 +551,7 @@ static bool nxtcDeserializeDataBlobs(u8 *cache_file_data, const NxTitleCacheFile
     bool success = false, free_entries = false;
 
     /* Reallocate title cache entry pointer array. */
-    if (!nxtcReallocateCacheEntryArray(entry_count, false)) goto end;
+    if (!nxtcReallocateTitleCache(entry_count, false)) goto end;
 
     free_entries = true;
 
@@ -475,10 +559,10 @@ static bool nxtcDeserializeDataBlobs(u8 *cache_file_data, const NxTitleCacheFile
     for(u32 i = 0; i < entry_count; i++)
     {
         const NxTitleCacheFileEntry *cur_cache_file_entry = &(cache_file_entries[i]);
-        NxTitleCacheEntry *cache_entry = NULL;
+        NxTitleCacheApplicationMetadata *cache_entry = NULL;
 
         /* Check if we have already added a cache entry for the current title ID. */
-        cache_entry = nxtcGetEntryById(cur_cache_file_entry->title_id);
+        cache_entry = _nxtcGetApplicationMetadataEntryById(cur_cache_file_entry->title_id);
         if (cache_entry)
         {
             NXTC_LOG_MSG("Entry already available for %016lX. Skipping cache file entry.", cur_cache_file_entry->title_id);
@@ -511,17 +595,17 @@ static bool nxtcDeserializeDataBlobs(u8 *cache_file_data, const NxTitleCacheFile
     g_titleCacheCount += extra_entry_count;
 
     /* Free extra allocated pointers if we didn't use them. */
-    if (extra_entry_count < entry_count) nxtcReallocateCacheEntryArray(0, false);
+    if (extra_entry_count < entry_count) nxtcReallocateTitleCache(0, false);
 
     /* Sort title cache entries by title ID. */
-    if (g_titleCacheCount > 1) qsort(g_titleCache, g_titleCacheCount, sizeof(NxTitleCacheEntry*), &nxtcEntrySortFunction);
+    if (g_titleCacheCount > 1) qsort(g_titleCache, g_titleCacheCount, sizeof(NxTitleCacheApplicationMetadata*), &nxtcEntrySortFunction);
 
     /* Update flag. */
     success = true;
 
 end:
     /* Free previously allocated title cache entry pointers. Ignore return value. */
-    if (!success && free_entries) nxtcReallocateCacheEntryArray(extra_entry_count, true);
+    if (!success && free_entries) nxtcReallocateTitleCache(extra_entry_count, true);
 
     return success;
 }
@@ -647,7 +731,7 @@ static NxTitleCacheFileEntry *nxtcSerializeDataBlobs(u8 **cache_file_data, size_
     /* Populate title cache file entries and generate data blobs. */
     for(u32 i = 0; i < g_titleCacheCount; i++)
     {
-        NxTitleCacheEntry *cur_cache_entry = g_titleCache[i];
+        NxTitleCacheApplicationMetadata *cur_cache_entry = g_titleCache[i];
         NxTitleCacheFileEntry *cur_cache_file_entry = &(cache_file_entries[i]);
 
         /* Append data blob for the current title cache file entry to our buffer. */
@@ -666,7 +750,7 @@ static NxTitleCacheFileEntry *nxtcSerializeDataBlobs(u8 **cache_file_data, size_
     return (success ? cache_file_entries : NULL);
 }
 
-static NxTitleCacheEntry *nxtcGenerateCacheEntryFromFileEntry(u8 *cache_file_data, const NxTitleCacheFileEntry *cache_file_entry, size_t *out_cur_offset)
+static NxTitleCacheApplicationMetadata *nxtcGenerateCacheEntryFromFileEntry(u8 *cache_file_data, const NxTitleCacheFileEntry *cache_file_entry, size_t *out_cur_offset)
 {
     if (!cache_file_data || !cache_file_entry || !out_cur_offset)
     {
@@ -677,7 +761,7 @@ static NxTitleCacheEntry *nxtcGenerateCacheEntryFromFileEntry(u8 *cache_file_dat
     u8 *data_blob = (cache_file_data + *out_cur_offset);
     u32 data_blob_crc = 0;
 
-    NxTitleCacheEntry *out = NULL;
+    NxTitleCacheApplicationMetadata *out = NULL;
     size_t data_offset = 0;
 
     bool success = false;
@@ -691,7 +775,7 @@ static NxTitleCacheEntry *nxtcGenerateCacheEntryFromFileEntry(u8 *cache_file_dat
     }
 
     /* Allocate memory for the output title cache entry. */
-    out = malloc(sizeof(NxTitleCacheEntry));
+    out = malloc(sizeof(NxTitleCacheApplicationMetadata));
     if (!out)
     {
         NXTC_LOG_MSG("Failed to allocate memory for the output title cache entry! (title %016lX).", cache_file_entry->title_id);
@@ -726,37 +810,27 @@ static NxTitleCacheEntry *nxtcGenerateCacheEntryFromFileEntry(u8 *cache_file_dat
     success = true;
 
 end:
-    if (!success && out) nxtcFreeCacheEntry(&out);
+    if (!success && out) nxtcFreeApplicationMetadata(&out);
 
     return out;
 }
 
-static NxTitleCacheEntry *nxtcGenerateCacheEntryFromUserData(u64 title_id, const char *name, const char *publisher, size_t icon_size, const void *icon_data)
+static NxTitleCacheApplicationMetadata *nxtcGenerateCacheEntryFromUserData(u64 title_id, const NacpLanguageEntry *lang_entry, size_t icon_size, const void *icon_data)
 {
-    NxTitleCacheEntry *out = NULL;
+    NxTitleCacheApplicationMetadata *out = NULL;
     bool success = false;
 
     /* Allocate memory for the output title cache entry. */
-    out = malloc(sizeof(NxTitleCacheEntry));
+    out = malloc(sizeof(NxTitleCacheApplicationMetadata));
     if (!out)
     {
         NXTC_LOG_MSG("Failed to allocate memory for the output title cache entry! (title %016lX).", title_id);
         goto end;
     }
 
-    /* Populate title cache entry fields. */
+    /* Fill title cache entry. */
     out->title_id = title_id;
-
-    out->name = strdup(name);
-    nxtcUtilsTrimString(out->name);
-
-    out->publisher = strdup(publisher);
-    nxtcUtilsTrimString(out->publisher);
-
-    out->icon_size = icon_size;
-
-    out->icon_data = malloc(out->icon_size);
-    if (out->icon_data) memcpy(out->icon_data, icon_data, out->icon_size);
+    nxtcFillCacheEntryWithUserData(out, lang_entry, icon_size, icon_data);
 
     if (!out->name || !out->publisher || !out->icon_data)
     {
@@ -768,29 +842,20 @@ static NxTitleCacheEntry *nxtcGenerateCacheEntryFromUserData(u64 title_id, const
     success = true;
 
 end:
-    if (!success && out) nxtcFreeCacheEntry(&out);
+    if (!success && out) nxtcFreeApplicationMetadata(&out);
 
     return out;
 }
 
-static bool nxtcUpdateCacheEntryWithUserData(NxTitleCacheEntry *cache_entry, const char *name, const char *publisher, size_t icon_size, const void *icon_data)
+static bool nxtcUpdateCacheEntryWithUserData(NxTitleCacheApplicationMetadata *cache_entry, const NacpLanguageEntry *lang_entry, size_t icon_size, const void *icon_data)
 {
-    NxTitleCacheEntry bkp_cache_entry = {0};
+    NxTitleCacheApplicationMetadata bkp_cache_entry = {0};
 
-    /* Backup current entry data in case an error occurs. */
-    memcpy(&bkp_cache_entry, cache_entry, sizeof(NxTitleCacheEntry));
+    /* Backup current title cache entry data in case an error occurs. */
+    memcpy(&bkp_cache_entry, cache_entry, sizeof(NxTitleCacheApplicationMetadata));
 
-    /* Populate title cache entry fields. */
-    cache_entry->name = strdup(name);
-    nxtcUtilsTrimString(cache_entry->name);
-
-    cache_entry->publisher = strdup(publisher);
-    nxtcUtilsTrimString(cache_entry->publisher);
-
-    cache_entry->icon_size = (u32)icon_size;
-
-    cache_entry->icon_data = malloc(cache_entry->icon_size);
-    if (cache_entry->icon_data) memcpy(cache_entry->icon_data, icon_data, cache_entry->icon_size);
+    /* Fill title cache entry. */
+    nxtcFillCacheEntryWithUserData(cache_entry, lang_entry, icon_size, icon_data);
 
     if (!cache_entry->name || !cache_entry->publisher || !cache_entry->icon_data)
     {
@@ -801,13 +866,13 @@ static bool nxtcUpdateCacheEntryWithUserData(NxTitleCacheEntry *cache_entry, con
         if (cache_entry->publisher) free(cache_entry->publisher);
         if (cache_entry->icon_data) free(cache_entry->icon_data);
 
-        /* Restore cache entry data. */
-        memcpy(cache_entry, &bkp_cache_entry, sizeof(NxTitleCacheEntry));
+        /* Restore original title cache entry data. */
+        memcpy(cache_entry, &bkp_cache_entry, sizeof(NxTitleCacheApplicationMetadata));
 
         return false;
     }
 
-    /* Free previous data. */
+    /* Free previous title cache entry data. */
     free(bkp_cache_entry.name);
     free(bkp_cache_entry.publisher);
     free(bkp_cache_entry.icon_data);
@@ -815,23 +880,41 @@ static bool nxtcUpdateCacheEntryWithUserData(NxTitleCacheEntry *cache_entry, con
     return true;
 }
 
-NX_INLINE void nxtcFreeCacheEntry(NxTitleCacheEntry **cache_entry)
+static void nxtcFillCacheEntryWithUserData(NxTitleCacheApplicationMetadata *cache_entry, const NacpLanguageEntry *lang_entry, size_t icon_size, const void *icon_data)
 {
-    NxTitleCacheEntry *ptr = NULL;
+    /* Duplicate title name and publisher strings. */
+    if (lang_entry)
+    {
+        if (lang_entry->name[0])
+        {
+            cache_entry->name = strndup(lang_entry->name, sizeof(lang_entry->name));
+            nxtcUtilsTrimString(cache_entry->name);
+        } else {
+            cache_entry->name = strdup(g_curPlaceholderString);
+        }
 
-    if (!cache_entry || !(ptr = *cache_entry)) return;
+        if (lang_entry->author[0])
+        {
+            cache_entry->publisher = strndup(lang_entry->author, sizeof(lang_entry->author));
+            nxtcUtilsTrimString(cache_entry->publisher);
+        } else {
+            cache_entry->publisher = strdup(g_curPlaceholderString);
+        }
+    } else {
+        cache_entry->name = strdup(g_curPlaceholderString);
+        cache_entry->publisher = strdup(g_curPlaceholderString);
+    }
 
-    if (ptr->name) free(ptr->name);
-    if (ptr->publisher) free(ptr->publisher);
-    if (ptr->icon_data) free(ptr->icon_data);
+    /* Duplicate icon data. */
+    cache_entry->icon_size = (u32)icon_size;
+    cache_entry->icon_data = malloc(cache_entry->icon_size);
 
-    free(ptr);
-    *cache_entry = NULL;
+    if (cache_entry->icon_data) memcpy(cache_entry->icon_data, icon_data, cache_entry->icon_size);
 }
 
-static bool nxtcReallocateCacheEntryArray(u32 extra_entry_count, bool free_entries)
+static bool nxtcReallocateTitleCache(u32 extra_entry_count, bool free_entries)
 {
-    NxTitleCacheEntry **tmp_title_cache = NULL;
+    NxTitleCacheApplicationMetadata **tmp_title_cache = NULL;
     u32 realloc_entry_count = (!free_entries ? (g_titleCacheCount + extra_entry_count) : g_titleCacheCount);
     bool success = false;
 
@@ -844,13 +927,13 @@ static bool nxtcReallocateCacheEntryArray(u32 extra_entry_count, bool free_entri
         }
 
         /* Free previously allocated title cache entries. */
-        for(u32 i = 0; i <= extra_entry_count; i++) nxtcFreeCacheEntry(&(g_titleCache[g_titleCacheCount + i]));
+        for(u32 i = 0; i <= extra_entry_count; i++) nxtcFreeApplicationMetadata(&(g_titleCache[g_titleCacheCount + i]));
     }
 
     if (realloc_entry_count)
     {
         /* Reallocate title cache entry pointer array. */
-        tmp_title_cache = realloc(g_titleCache, realloc_entry_count * sizeof(NxTitleCacheEntry*));
+        tmp_title_cache = realloc(g_titleCache, realloc_entry_count * sizeof(NxTitleCacheApplicationMetadata*));
         if (tmp_title_cache)
         {
             /* Update title cache entry pointer. */
@@ -858,7 +941,7 @@ static bool nxtcReallocateCacheEntryArray(u32 extra_entry_count, bool free_entri
             tmp_title_cache = NULL;
 
             /* Clear new title cache entry pointer array area (if needed). */
-            if (realloc_entry_count > g_titleCacheCount) memset(g_titleCache + g_titleCacheCount, 0, extra_entry_count * sizeof(NxTitleCacheEntry*));
+            if (realloc_entry_count > g_titleCacheCount) memset(g_titleCache + g_titleCacheCount, 0, extra_entry_count * sizeof(NxTitleCacheApplicationMetadata*));
         } else {
             NXTC_LOG_MSG("Failed to reallocate title cache entry pointer array! (%u element[s]).", realloc_entry_count);
             goto end;
@@ -878,7 +961,27 @@ end:
     return success;
 }
 
-static bool nxtcAppendDataBlobToFileCacheBuffer(u8 **cache_file_data, const NxTitleCacheEntry *cache_entry, NxTitleCacheFileEntry *cache_file_entry, u32 *out_blob_offset, size_t *out_cur_offset)
+static void nxtcFreeTitleCache(bool flush)
+{
+    if (g_titleCache)
+    {
+        /* Write title cache file. */
+        /* This will return immediately if there's no pending changes. */
+        if (flush) nxtcSaveFile();
+
+        /* Free title cache entries. */
+        for(u32 i = 0; i < g_titleCacheCount; i++) nxtcFreeApplicationMetadata(&(g_titleCache[i]));
+
+        /* Free title cache pointer array. */
+        free(g_titleCache);
+        g_titleCache = NULL;
+    }
+
+    /* Reset title cache entry count. */
+    g_titleCacheCount = 0;
+}
+
+static bool nxtcAppendDataBlobToFileCacheBuffer(u8 **cache_file_data, const NxTitleCacheApplicationMetadata *cache_entry, NxTitleCacheFileEntry *cache_file_entry, u32 *out_blob_offset, size_t *out_cur_offset)
 {
     if (!cache_file_data || !*cache_file_data || !cache_entry || !cache_file_entry || !out_blob_offset || !IS_ALIGNED(*out_blob_offset, TITLE_CACHE_ALIGNMENT) || !out_cur_offset)
     {
@@ -952,19 +1055,40 @@ end:
     return success;
 }
 
+/* Loosely based on code from libnx's nacpGetLanguageEntry(). */
+static const NacpLanguageEntry *nxtcGetNacpLanguageEntry(const NacpStruct *nacp)
+{
+    if (!nacp) return NULL;
+
+    const NacpLanguageEntry *entry = &(nacp->lang[g_nacpLangTable[g_systemLanguage]]);
+
+    if (!entry->name[0] && !entry->author[0])
+    {
+        for(u8 i = 0; i < 16; i++)
+        {
+            entry = &(nacp->lang[i]);
+            if (entry->name[0] || entry->author[0]) break;
+        }
+    }
+
+    if (!entry->name[0] && !entry->author[0]) return NULL;
+
+    return entry;
+}
+
 NX_INLINE u32 nxtcCalculateDataBlobSize(u16 name_len, u16 publisher_len, u32 icon_size)
 {
     if (!name_len || !publisher_len || !icon_size) return 0;
     return (icon_size + ALIGN_UP(name_len, TITLE_CACHE_ALIGNMENT) + ALIGN_UP(publisher_len, TITLE_CACHE_ALIGNMENT));
 }
 
-static NxTitleCacheEntry *nxtcGetEntryById(u64 title_id)
+static NxTitleCacheApplicationMetadata *_nxtcGetApplicationMetadataEntryById(u64 title_id)
 {
     if (!g_nxtcInit || !g_titleCache || !g_titleCacheCount || !title_id) return NULL;
 
     for(u32 i = 0; i < g_titleCacheCount; i++)
     {
-        NxTitleCacheEntry *cur_cache_entry = g_titleCache[i];
+        NxTitleCacheApplicationMetadata *cur_cache_entry = g_titleCache[i];
         if (cur_cache_entry && cur_cache_entry->title_id == title_id) return cur_cache_entry;
     }
 
@@ -973,8 +1097,8 @@ static NxTitleCacheEntry *nxtcGetEntryById(u64 title_id)
 
 static int nxtcEntrySortFunction(const void *a, const void *b)
 {
-    const NxTitleCacheEntry *title_cache_entry_1 = *((const NxTitleCacheEntry**)a);
-    const NxTitleCacheEntry *title_cache_entry_2 = *((const NxTitleCacheEntry**)b);
+    const NxTitleCacheApplicationMetadata *title_cache_entry_1 = *((const NxTitleCacheApplicationMetadata**)a);
+    const NxTitleCacheApplicationMetadata *title_cache_entry_2 = *((const NxTitleCacheApplicationMetadata**)b);
 
     if (title_cache_entry_1->title_id < title_cache_entry_2->title_id)
     {
